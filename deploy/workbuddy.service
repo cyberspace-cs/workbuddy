@@ -1,0 +1,20 @@
+[Unit]
+Description=WorkBuddy AI Assistant (hand-built multi-agent)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/workbuddy/backend
+Environment=HOST=0.0.0.0
+Environment=PORT=9000
+Environment=MOCK_MODE=auto
+Environment=DATA_DIR=/home/ubuntu/workbuddy/data
+ExecStart=/home/ubuntu/workbuddy/backend/.venv/bin/python run.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
