@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WorkBuddy 手搓版</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <!-- 侧边栏 -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">WB</div>
+        <div>
+          <div class="brand-name">WorkBuddy</div>
+          <div class="brand-sub">手搓版 · 编排引擎</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <label class="field-label">会话 ID</label>
+        <input id="sessionId" class="input" value="default" />
+      </div>
+
+      <div class="panel">
+        <label class="field-label">运行模式</label>
+        <div class="seg">
+          <button class="seg-btn active" data-mode="auto">自动</button>
+          <button class="seg-btn" data-mode="agent">单专家</button>
+          <button class="seg-btn" data-mode="swarm">智囊团</button>
+        </div>
+      </div>
+
+      <div class="panel" id="agentPanel" hidden>
+        <label class="field-label">选择专家</label>
+        <select id="agentSelect" class="input"></select>
+      </div>
+
+      <div class="panel" id="swarmPanel" hidden>
+        <label class="field-label">参与专家（智囊团）</label>
+        <div id="expertList" class="checks"></div>
+      </div>
+
+      <button id="resetBtn" class="btn-ghost">清空会话</button>
+
+      <div class="hint">
+        提示：问「搜索一下多智能体编排」看工具调用；<br/>
+        打开「智囊团」看多专家并行与置信加权综合；<br/>
+        让工程师「写一段 HTML」看 Artifact 实时预览。
+      </div>
+    </aside>
+
+    <!-- 对话区 -->
+    <main class="chat">
+      <div class="chat-head">
+        <span id="modeBadge" class="badge">自动路由</span>
+        <span id="modelBadge" class="badge muted">model</span>
+        <span id="status" class="status"></span>
+      </div>
+      <div id="messages" class="messages"></div>
+      <div class="composer">
+        <textarea id="input" class="composer-input" rows="2" placeholder="给 WorkBuddy 发消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button id="sendBtn" class="btn-primary">发送</button>
+      </div>
+    </main>
+
+    <!-- 右侧：执行轨迹 + Artifact -->
+    <aside class="right">
+      <div class="right-head">执行轨迹 / 产出</div>
+      <div id="activity" class="activity"></div>
+      <div class="right-head">Artifact 预览</div>
+      <div id="artifacts" class="artifacts">
+        <div class="empty">暂无产物。让助手生成代码 / HTML 即可在此预览。</div>
+      </div>
+    </aside>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

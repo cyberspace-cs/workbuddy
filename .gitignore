@@ -1,0 +1,23 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# ---- Runtime data (generated at runtime) ----
+data/
+
+# ---- Secrets / local env ----
+.env
+.env.*
+
+# ---- WorkBuddy workspace internal ----
+.workbuddy/
+
+# ---- Logs ----
+*.log
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
