@@ -11,6 +11,8 @@ class ChatRequest(BaseModel):
     mode: str = Field(default="auto")
     agent: str | None = None          # mode=agent 时指定 tag
     agents: list[str] | None = None   # mode=swarm 时指定专家 tag 列表
+    provider: str | None = None       # LLM provider id（见 config.PROVIDERS），mock 或空走 Mock
+    model: str | None = None          # 具体模型名
 
 
 class AgentInfo(BaseModel):

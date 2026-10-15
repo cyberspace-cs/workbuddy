@@ -1,326 +1,523 @@
+/* ============================================================
+   WorkBuddy 前端逻辑
+   - 拉取专家/模型列表
+   - SSE 流式对话（单专家 / 智囊团 / 工具调用 / Artifact）
+   - Markdown 渲染 + Artifact 实时预览
+   ============================================================ */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
 
 const state = {
-  sessionId: "default",
   mode: "auto",
-  agent: null,
-  agents: new Set(),
-  controller: null,
-  rawText: "",
-  assistantEl: null,
-  actCards: {}, // agent tag -> activity card element
+  agents: [],        // 全部专家
+  models: { providers: [], default_mock: true },
+  currentText: "",   // 正在流式拼接的助手文本
+  streaming: false,
 };
 
-// ---------- 初始化 ----------
+const MODE_LABEL = { auto: "自动路由", agent: "单专家", swarm: "智囊团" };
+
+/* ---------- 初始化 ---------- */
 async function init() {
-  try {
-    const res = await fetch("/api/agents");
-    const data = await res.json();
-    fillAgents(data.agents || []);
-    $("modelBadge").textContent = `${data.model || "?"}${data.mock ? " · Mock" : ""}`;
-  } catch (e) {
-    console.error(e);
-  }
-  bindUI();
+  await Promise.all([loadAgents(), loadModels()]);
+  bindEvents();
+  triggerReveal();
 }
 
-function fillAgents(agents) {
-  const sel = $("agentSelect");
-  const list = $("expertList");
+async function loadAgents() {
+  try {
+    const r = await fetch("/api/agents");
+    const data = await r.json();
+    state.agents = data.agents || [];
+    fillAgentSelect();
+    fillExpertList();
+  } catch (e) {
+    console.error("loadAgents failed", e);
+  }
+}
+
+async function loadModels() {
+  try {
+    const r = await fetch("/api/models");
+    const data = await r.json();
+    state.models = data;
+    fillProviderSelect();
+  } catch (e) {
+    console.error("loadModels failed", e);
+  }
+}
+
+/* ---------- 选择器填充 ---------- */
+function fillProviderSelect() {
+  const sel = $("providerSelect");
   sel.innerHTML = "";
-  list.innerHTML = "";
-  agents.forEach((a) => {
+  const provs = state.models.providers || [];
+  // 默认选中第一个可用（非空 mock）provider；都没有则 mock
+  let defaultId = "mock";
+  for (const p of provs) {
+    if (p.id !== "mock" && p.available) { defaultId = p.id; break; }
+  }
+  for (const p of provs) {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.id === "mock" ? "Mock（离线演示）" : `${p.name}`;
+    opt.disabled = !p.available && p.id !== "mock";
+    if (opt.disabled) opt.textContent += " · 未配置";
+    if (p.id === defaultId) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  fillModelSelect();
+}
+
+function fillModelSelect() {
+  const psel = $("providerSelect");
+  const msel = $("modelSelect");
+  const pid = psel.value;
+  const prov = (state.models.providers || []).find((p) => p.id === pid);
+  msel.innerHTML = "";
+  const models = prov ? prov.models : ["mock"];
+  for (const m of models) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m;
+    msel.appendChild(opt);
+  }
+}
+
+function fillAgentSelect() {
+  const sel = $("agentSelect");
+  sel.innerHTML = "";
+  for (const a of state.agents) {
     const opt = document.createElement("option");
     opt.value = a.tag;
-    opt.textContent = `${a.name}（${a.role.slice(0, 12)}）`;
+    opt.textContent = `${a.name} · ${a.role}`;
     sel.appendChild(opt);
+  }
+  if (!sel.value && state.agents[0]) sel.value = state.agents[0].tag;
+}
 
+function fillExpertList() {
+  const box = $("expertList");
+  box.innerHTML = "";
+  for (const a of state.agents) {
+    if (a.tag === "general") continue;
     const label = document.createElement("label");
     label.className = "check";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.value = a.tag;
-    cb.checked = ["researcher", "coder", "critic", "planner"].includes(a.tag);
-    cb.addEventListener("change", () => {
-      if (cb.checked) state.agents.add(a.tag);
-      else state.agents.delete(a.tag);
-    });
-    label.appendChild(cb);
-    const span = document.createElement("span");
-    span.textContent = a.name;
-    span.style.color = a.color;
-    label.appendChild(span);
-    list.appendChild(label);
-    if (cb.checked) state.agents.add(a.tag);
-  });
-  state.agent = sel.value;
+    const inp = document.createElement("input");
+    inp.type = "checkbox";
+    inp.value = a.tag;
+    inp.checked = ["researcher", "coder", "critic"].includes(a.tag);
+    const bx = document.createElement("span");
+    bx.className = "box";
+    const txt = document.createElement("span");
+    txt.textContent = `${a.name}`;
+    label.append(inp, bx, txt);
+    box.appendChild(label);
+  }
 }
 
-function bindUI() {
-  document.querySelectorAll(".seg-btn").forEach((b) => {
-    b.addEventListener("click", () => {
-      document.querySelectorAll(".seg-btn").forEach((x) => x.classList.remove("active"));
-      b.classList.add("active");
-      state.mode = b.dataset.mode;
-      $("agentPanel").hidden = state.mode !== "agent";
-      $("swarmPanel").hidden = state.mode !== "swarm";
-      const txt = { auto: "自动路由", agent: "单专家", swarm: "智囊团" }[state.mode];
-      $("modeBadge").textContent = txt;
-    });
+/* ---------- 事件绑定 ---------- */
+function bindEvents() {
+  // 模式分段
+  const seg = $("modeSeg");
+  seg.querySelectorAll(".seg-btn").forEach((b) => {
+    b.addEventListener("click", () => setMode(b.dataset.mode));
   });
-  $("agentSelect").addEventListener("change", (e) => (state.agent = e.target.value));
-  $("sessionId").addEventListener("change", (e) => (state.sessionId = e.target.value || "default"));
-  $("resetBtn").addEventListener("click", async () => {
-    await fetch("/api/reset", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: state.sessionId }),
-    });
-    $("messages").innerHTML = "";
-    $("activity").innerHTML = "";
-    $("artifacts").innerHTML = '<div class="empty">暂无产物。让助手生成代码 / HTML 即可在此预览。</div>';
-  });
+  setMode("auto");
+
+  $("providerSelect").addEventListener("change", fillModelSelect);
   $("sendBtn").addEventListener("click", send);
+  $("resetBtn").addEventListener("click", resetSession);
   $("input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  $("menuToggle").addEventListener("click", toggleDrawer);
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  const seg = $("modeSeg");
+  const btns = seg.querySelectorAll(".seg-btn");
+  let active = null;
+  btns.forEach((b) => {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle("active", on);
+    if (on) active = b;
+  });
+  // 滑动药丸
+  const pill = seg.querySelector(".seg-pill");
+  if (active && pill) {
+    pill.style.width = active.offsetWidth + "px";
+    pill.style.transform = `translateX(${active.offsetLeft - 4}px)`;
+  }
+  $("agentPanel").hidden = mode !== "agent";
+  $("swarmPanel").hidden = mode !== "swarm";
+  $("modeBadge").textContent = MODE_LABEL[mode];
+}
+
+function triggerReveal() {
+  requestAnimationFrame(() => {
+    document.querySelectorAll(".sidebar .reveal").forEach((el) => el.classList.add("in"));
   });
 }
 
-// ---------- 发送与 SSE ----------
+function toggleDrawer() {
+  const sb = $("sidebar");
+  sb.classList.toggle("open");
+  let scrim = document.querySelector(".scrim");
+  if (sb.classList.contains("open") && !scrim) {
+    scrim = document.createElement("div");
+    scrim.className = "scrim";
+    scrim.addEventListener("click", toggleDrawer);
+    document.body.appendChild(scrim);
+  } else if (!sb.classList.contains("open") && scrim) {
+    scrim.remove();
+  }
+}
+
+/* ---------- 发送 / SSE ---------- */
+function selectedExperts() {
+  return Array.from($("expertList").querySelectorAll("input:checked")).map((i) => i.value);
+}
+
 async function send() {
+  if (state.streaming) return;
   const input = $("input");
-  const text = input.value.trim();
-  if (!text || state.controller) return;
+  const msg = input.value.trim();
+  if (!msg) return;
   input.value = "";
 
-  addMessage("user", text);
-  const aEl = addMessage("assistant", "");
-  state.assistantEl = aEl;
-  state.rawText = "";
-  state.actCards = {};
-  $("activity").innerHTML = "";
+  const sessionId = $("sessionId").value.trim() || "default";
+  const provider = $("providerSelect").value;
+  const model = $("modelSelect").value;
+
+  appendMessage("user", msg);
+  resetActivity();
+  resetArtifacts();
+  setStatus("streaming", "生成中…");
+  state.streaming = true;
+  $("sendBtn").disabled = true;
+  state.currentText = "";
 
   const body = {
-    session_id: state.sessionId,
-    message: text,
+    session_id: sessionId,
+    message: msg,
     mode: state.mode,
-    agent: state.mode === "agent" ? state.agent : null,
-    agents: state.mode === "swarm" ? [...state.agents] : null,
+    provider,
+    model,
   };
-
-  const controller = new AbortController();
-  state.controller = controller;
-  $("sendBtn").disabled = true;
-  $("status").textContent = "思考中…";
+  if (state.mode === "agent") body.agent = $("agentSelect").value;
+  if (state.mode === "swarm") body.agents = selectedExperts();
 
   try {
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const blocks = buf.split("\n\n");
-      buf = blocks.pop() || "";
-      for (const block of blocks) dispatchBlock(block);
-    }
+    await streamChat(body);
   } catch (e) {
-    if (e.name !== "AbortError") appendText(state.assistantEl, "\n[连接错误] " + e.message);
+    addActivity("error", `请求失败：${e.message}`);
   } finally {
-    finish();
+    state.streaming = false;
+    $("sendBtn").disabled = false;
+    setStatus("idle", "");
   }
 }
 
-function dispatchBlock(block) {
+async function streamChat(body) {
+  const resp = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    addActivity("error", `HTTP ${resp.status}`);
+    return;
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const parts = buf.split("\n\n");
+    buf = parts.pop() || "";
+    for (const chunk of parts) {
+      parseSSE(chunk);
+    }
+  }
+  // 收尾：把助手文本渲染为 Markdown
+  finalizeAssistant();
+}
+
+function parseSSE(chunk) {
   let event = "message";
-  let data = "";
-  for (const line of block.split("\n")) {
+  const dataLines = [];
+  for (const line of chunk.split("\n")) {
     if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) data += line.slice(5).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
   }
-  if (!data) return;
+  if (!dataLines.length) return;
   let payload;
-  try { payload = JSON.parse(data); } catch { return; }
-  dispatch(event, payload);
+  try { payload = JSON.parse(dataLines.join("")); } catch { return; }
+  handleEvent(event, payload);
 }
 
-function dispatch(event, p) {
+function handleEvent(event, data) {
   switch (event) {
-    case "meta":
-      $("modeBadge").textContent = p.mode === "swarm" ? "智囊团" : "单专家 / 自动";
+    case "meta": {
+      $("modeBadge").textContent = MODE_LABEL[data.mode] || data.mode;
+      $("providerBadge").textContent = data.provider || "mock";
+      const mb = $("modelBadge");
+      mb.textContent = data.model || "mock";
+      mb.classList.toggle("accent", data.mock === false);
+      showRouting(data);
       break;
+    }
     case "agent_start":
-      ensureAgentCard(p.agent, p.name, p.color, p.role);
+      ensureAssistant(data.name, data.color);
+      addActivity("agent", `${data.name} 开始处理`, data.color);
       break;
     case "thought":
-      appendActLine(p.agent, "thought", p.text);
+      addActivity("thought", data.text);
       break;
-    case "tool_call": {
-      let args = p.args || "";
-      try { args = JSON.stringify(JSON.parse(args)); } catch {}
-      appendActLine(p.agent, "tool", `🔧 调用 ${p.tool}(${args.length > 80 ? args.slice(0, 80) + "…" : args})`);
+    case "tool_call":
+      addActivity("tool", `⚙ ${data.tool}(${truncate(data.args || "", 80)})`, data.color);
       break;
-    }
     case "tool_result":
-      appendActLine(p.agent, "result", `↳ ${p.ok ? "成功" : "失败"}: ${String(p.result).slice(0, 300)}`);
+      addActivity("result", data.ok ? (data.result || "") : `错误：${data.result || ""}`);
       break;
     case "token":
-      state.rawText += p.text;
-      state.assistantEl.querySelector(".bubble").textContent = state.rawText;
-      scrollChat();
-      break;
-    case "artifact":
-      renderArtifact(p);
+      appendToken(data.text);
       break;
     case "swarm_view":
-      renderSwarmView(p);
+      addActivity("expert", `${data.name} · 置信 ${(data.confidence * 100).toFixed(0)}%`, data.color,
+        data.text);
       break;
-    case "swarm_consensus": {
-      const d = document.createElement("div");
-      d.className = "consensus";
-      d.textContent = `🧠 共识度 ${Math.round(p.value * 100)}%`;
-      $("activity").appendChild(d);
+    case "swarm_consensus":
+      addActivity("consensus", `共识度 ${(data.value * 100).toFixed(0)}%`);
       break;
-    }
-    case "done":
-      if (state.assistantEl) {
-        state.assistantEl.querySelector(".bubble").innerHTML = renderMarkdown(state.rawText);
-      }
+    case "artifact":
+      addArtifact(data);
       break;
     case "error":
-      appendText(state.assistantEl, "\n[错误] " + p.message);
+      addActivity("error", `错误：${data.message}`);
+      break;
+    case "done":
       break;
   }
 }
 
-function finish() {
-  state.controller = null;
-  $("sendBtn").disabled = false;
-  $("status").textContent = "就绪";
-  scrollChat();
-}
-
-// ---------- 渲染辅助 ----------
-function addMessage(role, text) {
+/* ---------- 消息渲染 ---------- */
+function appendMessage(role, text) {
   const wrap = document.createElement("div");
   wrap.className = `msg ${role}`;
-  const av = document.createElement("div");
-  av.className = "avatar";
-  av.textContent = role === "user" ? "你" : "AI";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = role === "user" ? "你" : "WB";
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   bubble.textContent = text;
-  wrap.appendChild(av);
-  wrap.appendChild(bubble);
+  wrap.append(avatar, bubble);
   $("messages").appendChild(wrap);
-  scrollChat();
+  scrollMessages();
   return wrap;
 }
 
-function appendText(el, t) {
-  if (!el) return;
-  el.querySelector(".bubble").textContent += t;
-  scrollChat();
+let assistantWrap = null;
+let assistantBubble = null;
+
+function ensureAssistant(name, color) {
+  assistantWrap = document.createElement("div");
+  assistantWrap.className = "msg assistant";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = "WB";
+  avatar.style.background = color || "var(--color-accent)";
+  assistantBubble = document.createElement("div");
+  assistantBubble.className = "bubble";
+  assistantBubble.innerHTML = '<span class="cursor"></span>';
+  assistantWrap.append(avatar, assistantBubble);
+  $("messages").appendChild(assistantWrap);
+  scrollMessages();
 }
 
-function scrollChat() {
-  const m = $("messages");
-  m.scrollTop = m.scrollHeight;
+function appendToken(text) {
+  if (!assistantBubble) ensureAssistant("助手", "var(--color-accent)");
+  state.currentText += text;
+  assistantBubble.textContent = state.currentText;
+  const cur = document.createElement("span");
+  cur.className = "cursor";
+  assistantBubble.appendChild(cur);
+  scrollMessages();
 }
 
-function ensureAgentCard(tag, name, color, role) {
-  if (state.actCards[tag]) return state.actCards[tag];
+function finalizeAssistant() {
+  if (assistantBubble && state.currentText) {
+    assistantBubble.innerHTML = marked.parse(state.currentText);
+    state.currentText = "";
+  }
+  assistantWrap = null;
+  assistantBubble = null;
+}
+
+/* ---------- 右侧轨迹 ---------- */
+function resetActivity() {
+  $("activity").innerHTML = "";
+  assistantWrap = null;
+  assistantBubble = null;
+}
+
+function addActivity(kind, text, color, full) {
+  const box = $("activity");
+  const empty = box.querySelector(".empty");
+  if (empty) empty.remove();
   const card = document.createElement("div");
   card.className = "act-card";
-  card.innerHTML = `<div class="act-head"><span class="act-dot" style="background:${color}"></span>${name}<span class="act-line" style="margin-left:6px;font-weight:400">· ${role}</span></div>`;
-  $("activity").appendChild(card);
-  state.actCards[tag] = card;
-  return card;
+  const head = document.createElement("div");
+  head.className = "act-head";
+  const dot = document.createElement("span");
+  dot.className = "act-dot";
+  dot.style.background = color || defaultColor(kind);
+  const label = document.createElement("span");
+  label.textContent = headLabel(kind);
+  head.append(dot, label);
+  if (kind === "expert" || kind === "consensus") {
+    const c = document.createElement("span");
+    c.className = "conf";
+    c.textContent = kind === "consensus" ? text : "";
+    head.appendChild(c);
+  }
+  card.appendChild(head);
+  if (text) {
+    const line = document.createElement("div");
+    line.className = "act-line " + lineClass(kind);
+    line.textContent = text;
+    card.appendChild(line);
+  }
+  if (full) {
+    const line = document.createElement("div");
+    line.className = "act-line";
+    line.textContent = full;
+    card.appendChild(line);
+  }
+  box.appendChild(card);
 }
 
-function appendActLine(tag, cls, text) {
-  const card = state.actCards[tag];
-  if (!card) return;
-  const line = document.createElement("div");
-  line.className = `act-line ${cls}`;
-  line.textContent = text;
-  card.appendChild(line);
-  const a = $("activity");
-  a.scrollTop = a.scrollHeight;
+function defaultColor(kind) {
+  return {
+    agent: "var(--color-accent)", thought: "var(--color-faint)",
+    tool: "var(--color-warn)", result: "var(--color-success)",
+    expert: "var(--color-accent)", consensus: "var(--color-accent)",
+    route: "var(--color-signal)", error: "var(--color-danger)",
+  }[kind] || "var(--color-muted)";
+}
+function headLabel(kind) {
+  return {
+    agent: "专家", thought: "思考", tool: "工具调用", result: "工具结果",
+    expert: "专家观点", consensus: "综合", route: "路由判定", error: "错误",
+  }[kind] || "事件";
 }
 
-function renderSwarmView(p) {
-  const card = document.createElement("div");
-  card.className = "act-card";
-  card.innerHTML = `<div class="act-head"><span class="act-dot" style="background:${p.color}"></span>${p.name}<span class="conf">置信度 ${Math.round(p.confidence * 100)}%</span></div>`;
-  const body = document.createElement("div");
-  body.className = "act-line";
-  body.innerHTML = renderMarkdown(p.text);
-  card.appendChild(body);
-  $("activity").appendChild(card);
-  state.actCards["swarm_" + p.agent] = card;
+/* 展示 TypeSafe(Jev) 的路由判定：选中专家 + 置信度 + 是否升级智囊团 */
+function showRouting(meta) {
+  const r = meta.routing;
+  if (!r) return;
+  if (r.source === "typesafe") {
+    const pct = Math.round((r.confidence || 0) * 100);
+    let extra = "";
+    if (meta.route_reason === "needs_collab") extra = " · 需多角度协作 → 智囊团";
+    else if (meta.route_reason === "low_confidence") extra = " · 置信不足 → 智囊团";
+    const dist = Object.entries(r.probabilities || {})
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k} ${(v * 100).toFixed(0)}%`)
+      .join("　");
+    addActivity("route", `Jev → ${r.agent} · 置信 ${pct}%${extra}`, undefined,
+      `模型 ${r.model}　协作需求 ${r.needs_collab == null ? "-" : (r.needs_collab * 100).toFixed(0) + "%"}\n${dist}`);
+  } else if (r.source === "keyword") {
+    addActivity("route", r.fallback_reason
+      ? `关键词路由（Jev 不可用，已降级：${truncate(r.fallback_reason, 60)}）`
+      : "关键词路由", undefined, r.fallback_reason || "");
+  }
+}
+function lineClass(kind) {
+  return { thought: "thought", tool: "tool", result: "result" }[kind] || "";
 }
 
-function renderArtifact(p) {
+/* ---------- Artifact ---------- */
+function resetArtifacts() {
+  $("artifacts").innerHTML = "";
+}
+
+function addArtifact(a) {
   const box = $("artifacts");
   const empty = box.querySelector(".empty");
   if (empty) empty.remove();
-
   const card = document.createElement("div");
   card.className = "art-card";
   const head = document.createElement("div");
   head.className = "art-head";
-  head.innerHTML = `<span class="art-tag">${p.type}</span><span>${escapeHtml(p.title)}</span>`;
+  const title = document.createElement("span");
+  title.textContent = a.title || a.type;
+  const tag = document.createElement("span");
+  tag.className = "art-tag";
+  tag.textContent = a.type;
   const actions = document.createElement("div");
   actions.className = "art-actions";
-  const openBtn = document.createElement("a");
-  openBtn.textContent = "新标签打开";
-  openBtn.target = "_blank";
-  const blob = new Blob([p.content], { type: p.type === "html" ? "text/html" : "text/plain" });
-  openBtn.href = URL.createObjectURL(blob);
-  actions.appendChild(openBtn);
-  head.appendChild(actions);
+  head.append(title, tag, actions);
 
-  const bodyEl = document.createElement("div");
-  bodyEl.className = "art-body";
-  if (p.type === "html") {
+  const body = document.createElement("div");
+  body.className = "art-body";
+  if (a.type === "html") {
     const iframe = document.createElement("iframe");
-    iframe.setAttribute("sandbox", "allow-scripts");
-    iframe.srcdoc = p.content;
-    bodyEl.appendChild(iframe);
+    iframe.srcdoc = a.content;
+    iframe.sandbox = "allow-scripts";
+    body.appendChild(iframe);
+    const dl = document.createElement("a");
+    dl.textContent = "下载";
+    dl.href = "data:text/html;charset=utf-8," + encodeURIComponent(a.content);
+    dl.download = (a.title || "artifact") + ".html";
+    actions.appendChild(dl);
   } else {
     const pre = document.createElement("pre");
-    pre.textContent = p.content;
-    bodyEl.appendChild(pre);
+    pre.textContent = a.content;
+    body.appendChild(pre);
+    const copy = document.createElement("button");
+    copy.textContent = "复制";
+    copy.addEventListener("click", () => navigator.clipboard.writeText(a.content));
+    actions.appendChild(copy);
   }
-
-  card.appendChild(head);
-  card.appendChild(bodyEl);
+  card.append(head, body);
   box.appendChild(card);
 }
 
-// ---------- Markdown ----------
-function renderMarkdown(text) {
-  if (text && window.marked && marked.parse) {
-    try { return marked.parse(text); } catch { /* fall through */ }
-  }
-  return escapeHtml(text).replace(/\n/g, "<br>");
+/* ---------- 杂项 ---------- */
+function setStatus(stateName, text) {
+  const s = $("status");
+  s.className = "status" + (stateName === "idle" ? " idle" : "");
+  s.textContent = text;
+}
+function scrollMessages() {
+  const m = $("messages");
+  m.scrollTop = m.scrollHeight;
+}
+function truncate(s, n) {
+  s = String(s || "");
+  return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+async function resetSession() {
+  const sessionId = $("sessionId").value.trim() || "default";
+  try {
+    await fetch("/api/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+  } catch {}
+  $("messages").innerHTML = "";
+  resetActivity();
+  resetArtifacts();
+  setStatus("idle", "");
 }
 
 init();

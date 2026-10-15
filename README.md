@@ -138,6 +138,27 @@
 - 每会话一个消息列表（Blackboard），同时落盘 `data/sessions.json`，重启可恢复。
 - 预留长期记忆 / 摘要压缩扩展点。
 
+### 3.7 TypeSafe（Jev · System One）意图路由（`typesafe.py`）
+用 TypeSafe 的 Jev 模型把「路由」从关键词硬匹配升级为**类型化判断 + 置信度门控**。
+
+- **Jev 不是 chat 模型**：它走独立接口 `POST https://api.typesafe.ai/v1/systemone`，
+  输入 `state` + 结构化 `questions`，返回**带概率与置信度的判断**（Noul / Choice / Score），
+  而不是生成文本。因此它不出现在前端的 chat 模型选择器里。
+- **一次请求并行问两个独立判断**（同一个 state，互不可见）：
+  - `choice`：这条请求该交给哪个专家（general / researcher / coder / critic / planner），返回选项概率分布 + 置信度；
+  - `noul`（推测性问题）：是否需要多位专家从不同角度共同评估。
+- **置信度门控（confidence-gated routing）**：
+  - 协作需求 `needs_collab ≥ 0.5` → 升级为智囊团；
+  - 路由置信度 `< 0.55` → 升级为智囊团；
+  - 否则单专家处理。升级时按 Jev 的概率分布取 Top-3 专家组队。
+- **优雅降级**：Jev 未配置 / 网络失败 / HTTP 错误（如 451 区域限制）时，
+  自动回落到关键词路由，并把降级原因写进 `meta.routing.fallback_reason`，请求不会失败。
+- 判定明细通过 SSE `meta` 事件下发，前端在「执行轨迹」里以「路由判定」卡片展示：
+  选中专家、置信度、是否升级、模型名与完整概率分布。
+
+对应 TypeSafe 的设计原则：代码掌控流程、独立判断并行提问、用概率与置信度驱动行为、
+严格区分模型错误与服务失败、密钥只留在服务端。
+
 ---
 
 ## 四、运行方式

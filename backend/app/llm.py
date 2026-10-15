@@ -19,9 +19,9 @@ from .config import settings
 JSON_HEADERS = {"Content-Type": "application/json"}
 
 
-def _auth_headers() -> dict:
+def _auth_headers(api_key: str) -> dict:
     return {
-        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
@@ -36,10 +36,13 @@ async def _real_stream(
     tools: list[dict] | None,
     temperature: float,
     max_tokens: int,
+    base_url: str,
+    api_key: str,
+    model: str,
 ) -> AsyncIterator[dict]:
-    url = f"{settings.OPENAI_BASE_URL}/chat/completions"
+    url = f"{base_url}/chat/completions"
     payload: dict = {
-        "model": settings.MODEL,
+        "model": model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -53,7 +56,7 @@ async def _real_stream(
     tool_acc: dict[int, dict] = {}
 
     async with httpx.AsyncClient(timeout=120) as client:
-        async with client.stream("POST", url, json=payload, headers=_auth_headers()) as resp:
+        async with client.stream("POST", url, json=payload, headers=_auth_headers(api_key)) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
                 yield {"type": "error", "message": f"LLM HTTP {resp.status_code}: {body[:300]}"}
@@ -235,9 +238,16 @@ async def stream_chat(
     agent_tag: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> AsyncIterator[dict]:
-    """统一入口：根据配置走真实或 Mock 流式。"""
-    if settings.use_mock:
+    """统一入口：根据 provider/model 走真实或 Mock 流式。
+
+    - provider="mock" 或该 provider 未配置密钥 -> Mock
+    - 否则用解析到的 base_url/api_key/model 走真实流式
+    """
+    resolved = settings.resolve(provider, model)
+    if resolved is None:
         async for ev in _mock_stream(messages, tools, agent_tag):
             yield ev
         return
@@ -246,5 +256,8 @@ async def stream_chat(
         tools,
         temperature if temperature is not None else settings.TEMPERATURE,
         max_tokens if max_tokens is not None else settings.MAX_TOKENS,
+        resolved["base_url"],
+        resolved["api_key"],
+        resolved["model"],
     ):
         yield ev

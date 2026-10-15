@@ -11,9 +11,12 @@ import re
 import uuid
 
 from .agents.registry import registry
+from .config import settings
 from .llm import stream_chat
 from .schemas import SSE
 from .tools.registry import registry as tool_registry
+from . import typesafe
+from .typesafe import TypeSafeError
 
 MAX_TOOL_ROUNDS = 4
 
@@ -37,23 +40,69 @@ def _pick_agent(query: str) -> str:
     return best
 
 
-def route(
+def _top_agents(probabilities: dict, k: int = 3) -> list[str]:
+    """按 Jev 给出的概率分布取前 k 个专家（已知 tag 才保留）。"""
+    ranked = sorted(probabilities.items(), key=lambda kv: -kv[1])
+    tags = [t for t, _ in ranked if registry.get(t)][:k]
+    return tags or ["researcher", "coder", "critic"]
+
+
+async def route(
     query: str,
     forced_mode: str = "auto",
     forced_agent: str | None = None,
     forced_agents: list[str] | None = None,
 ) -> dict:
+    """路由决策。
+
+    auto 模式下优先用 TypeSafe(Jev) 做「意图路由 + 置信度门控」：
+      - Choice 选出最合适的专家，并给出概率分布与置信度；
+      - Noul 判断是否需要多角度协作；
+      - 置信度低于阈值 或 协作需求高 -> 升级为智囊团。
+    Jev 不可用（未配置 / 服务失败 / 区域限制）时自动降级到关键词路由。
+    """
     if forced_mode == "agent" and forced_agent and registry.get(forced_agent):
-        return {"mode": "agent", "agent": forced_agent}
+        return {"mode": "agent", "agent": forced_agent,
+                "routing": {"source": "forced"}}
     if forced_mode == "swarm":
         tags = [t for t in (forced_agents or []) if registry.get(t)]
         if not tags:
             tags = ["researcher", "coder", "critic"]
-        return {"mode": "swarm", "agents": tags}
-    # auto
+        return {"mode": "swarm", "agents": tags, "routing": {"source": "forced"}}
+
+    # ---- auto：Jev 意图路由 ----
+    routing: dict = {"source": "keyword"}
+    if settings.USE_TYPESAFE_ROUTER and typesafe.available():
+        try:
+            r = await typesafe.route_intent(query)
+            routing = {
+                "source": "typesafe",
+                "model": r["model"],
+                "agent": r["agent"],
+                "confidence": r["confidence"],
+                "probabilities": r["probabilities"],
+                "needs_collab": r["needs_collab"],
+            }
+            needs = r["needs_collab"] or 0.0
+            # 置信度门控 + 协作需求：任一触发即升级为智囊团
+            if needs >= settings.TYPESAFE_SWARM_NOUL:
+                return {"mode": "swarm", "agents": _top_agents(r["probabilities"]),
+                        "routing": routing, "reason": "needs_collab"}
+            if r["confidence"] < settings.TYPESAFE_ROUTE_MIN_CONF:
+                return {"mode": "swarm", "agents": _top_agents(r["probabilities"]),
+                        "routing": routing, "reason": "low_confidence"}
+            return {"mode": "agent", "agent": r["agent"], "routing": routing}
+        except TypeSafeError as e:
+            # 服务/模型层面的失败：记录原因并降级，不让请求整体失败
+            routing = {"source": "keyword", "fallback_reason": str(e)}
+        except Exception as e:  # 兜底：任何异常都不要打断对话
+            routing = {"source": "keyword", "fallback_reason": f"{type(e).__name__}: {e}"}
+
+    # ---- 关键词兜底 ----
     if len(query) > 40 or any(t in query for t in _SWARM_TRIGGERS):
-        return {"mode": "swarm", "agents": ["researcher", "coder", "critic", "planner"]}
-    return {"mode": "agent", "agent": _pick_agent(query)}
+        return {"mode": "swarm", "agents": ["researcher", "coder", "critic", "planner"],
+                "routing": routing}
+    return {"mode": "agent", "agent": _pick_agent(query), "routing": routing}
 
 
 def build_messages(system_prompt: str, history: list[dict], user_msg: str) -> list[dict]:
@@ -103,7 +152,7 @@ def _append_tool_turn(messages: list[dict], call: dict, result: str) -> None:
     messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
 
 
-async def run_agent(agent_tag: str, history: list[dict], user_msg: str):
+async def run_agent(agent_tag: str, history: list[dict], user_msg: str, provider=None, model=None):
     """单 Agent 推理循环，产出 SSE 事件。"""
     agent = registry.get(agent_tag) or registry.get("general")
     yield SSE.AGENT_START, {
@@ -115,7 +164,7 @@ async def run_agent(agent_tag: str, history: list[dict], user_msg: str):
     answer_parts: list[str] = []
     for _ in range(MAX_TOOL_ROUNDS):
         followup = False
-        async for ev in stream_chat(messages, tool_schemas, agent_tag=agent.tag):
+        async for ev in stream_chat(messages, tool_schemas, agent_tag=agent.tag, provider=provider, model=model):
             t = ev["type"]
             if t == "thought":
                 yield SSE.THOUGHT, {"agent": agent.tag, "text": ev["text"]}

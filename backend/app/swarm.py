@@ -27,7 +27,7 @@ def _parse_confidence(text: str) -> float:
     return max(0.0, min(1.0, float(m.group(1))))
 
 
-async def _expert_answer(agent_tag: str, history: list[dict], user_msg: str):
+async def _expert_answer(agent_tag: str, history: list[dict], user_msg: str, provider=None, model=None):
     agent = registry.get(agent_tag) or registry.get("general")
     sys_prompt = (
         agent.system_prompt
@@ -35,7 +35,7 @@ async def _expert_answer(agent_tag: str, history: list[dict], user_msg: str):
     )
     messages = build_messages(sys_prompt, history, user_msg)
     parts: list[str] = []
-    async for ev in stream_chat(messages, agent_tag=agent.tag):
+    async for ev in stream_chat(messages, agent_tag=agent.tag, provider=provider, model=model):
         if ev["type"] == "token":
             parts.append(ev["text"])
         elif ev["type"] == "error":
@@ -46,14 +46,14 @@ async def _expert_answer(agent_tag: str, history: list[dict], user_msg: str):
     return text, conf
 
 
-async def run_swarm(agent_tags: list[str], history: list[dict], user_msg: str):
+async def run_swarm(agent_tags: list[str], history: list[dict], user_msg: str, provider=None, model=None):
     """智囊团协作，产出 SSE 事件。"""
     experts = [registry.get(t) for t in agent_tags if registry.get(t)]
     if not experts:
         experts = [registry.get("general")]
 
     # fan-out：并行求解
-    tasks = [_expert_answer(a.tag, history, user_msg) for a in experts]
+    tasks = [_expert_answer(a.tag, history, user_msg, provider, model) for a in experts]
     results = await asyncio.gather(*tasks)
 
     # 展示各专家观点
@@ -80,7 +80,7 @@ async def run_swarm(agent_tags: list[str], history: list[dict], user_msg: str):
     )
     messages = build_messages(synth.system_prompt, [], synth_user)
 
-    async for ev in stream_chat(messages, agent_tag="synthesizer"):
+    async for ev in stream_chat(messages, agent_tag="synthesizer", provider=provider, model=model):
         if ev["type"] == "token":
             yield SSE.TOKEN, {"text": ev["text"]}
         elif ev["type"] == "error":
