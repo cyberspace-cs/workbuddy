@@ -27,7 +27,7 @@ async function init() {
 
 async function loadAgents() {
   try {
-    const r = await fetch("/api/agents");
+    const r = await fetch("api/agents");
     const data = await r.json();
     state.agents = data.agents || [];
     fillAgentSelect();
@@ -39,7 +39,7 @@ async function loadAgents() {
 
 async function loadModels() {
   try {
-    const r = await fetch("/api/models");
+    const r = await fetch("api/models");
     const data = await r.json();
     state.models = data;
     fillProviderSelect();
@@ -222,7 +222,7 @@ async function send() {
 }
 
 async function streamChat(body) {
-  const resp = await fetch("/api/chat", {
+  const resp = await fetch("api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -508,7 +508,7 @@ function truncate(s, n) {
 async function resetSession() {
   const sessionId = $("sessionId").value.trim() || "default";
   try {
-    await fetch("/api/reset", {
+    await fetch("api/reset", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: sessionId }),
